@@ -8,7 +8,7 @@ The repository contains a clean distributable skill folder plus release artifact
 - `dist/`: packaged release zip and release metadata.
 - `README.md`: repository-facing installation and usage notes.
 
-Do not commit local `config.local.json`, caches, downloaded papers, generated notes, or temporary run outputs.
+Do not commit local `config.local.json`, caches, downloaded papers, generated notes, temporary run outputs, institutional usernames/passwords, cookies, sessions, proxy credentials, or tokens.
 
 ## Release Checklist
 
@@ -24,5 +24,5 @@ python .\paper-research-downloader\scripts\paper_research_downloader.py package 
 ```
 
 4. Verify the zip excludes `config.local.json`.
-5. Tag the release as `vX.Y.Z`.
-
+5. Verify package-time private-data scan passes.
+6. Tag the release as `vX.Y.Z`.

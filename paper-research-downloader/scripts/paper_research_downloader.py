@@ -19,14 +19,15 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import webbrowser
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "1.3.0"
-USER_AGENT = "paper-research-downloader/1.3 (+https://github.com/openai/codex)"
+VERSION = "1.4.0"
+USER_AGENT = "paper-research-downloader/1.4 (+https://github.com/openai/codex)"
 ATOM = "{http://www.w3.org/2005/Atom}"
 NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -46,7 +47,24 @@ DEFAULT_CONFIG = {
     "request_delay": 0.0,
     "batch_delay": 0.0,
     "zotero_local_api": "http://127.0.0.1:23119/api/users/0",
+    "institutional_proxy_prefix": "",
+    "download_dir": str(Path.home() / "Downloads"),
 }
+PRIVATE_ARTIFACT_NAMES = {
+    ".env",
+    ".netrc",
+    "config.local.json",
+    "cookies.txt",
+    "credentials.json",
+    "institutional-credentials.json",
+    "institutional_credentials.json",
+}
+PRIVATE_VALUE_RE = re.compile(
+    r"(?i)\b(password|passwd|pwd|credential|cookie|session|secret|access[_-]?token|refresh[_-]?token|bearer|institutional[_-]?username|institutional[_-]?password)\b"
+    r"\s*[:=]\s*['\"]?([^'\"\s,;}]+)"
+)
+PRIVATE_URL_RE = re.compile(r"https?://[^/\s:@]+:[^/\s:@]+@")
+PLACEHOLDER_VALUES = {"", "none", "null", "false", "true", "changeme", "example", "placeholder", "your_password", "your-token"}
 
 
 def now_stamp() -> str:
@@ -118,6 +136,11 @@ def default_cache_dir(config: Dict[str, Any]) -> Path:
     return Path(cache).expanduser() if cache else Path.home() / ".cache" / "paper-research-downloader"
 
 
+def default_download_dir(config: Dict[str, Any]) -> Path:
+    download_dir = config.get("download_dir") or ""
+    return Path(download_dir).expanduser() if download_dir else Path.home() / "Downloads"
+
+
 def safe_slug(text: str, max_len: int = 96) -> str:
     text = re.sub(r"<[^>]+>", " ", text or "")
     text = html.unescape(text)
@@ -131,6 +154,48 @@ def safe_slug(text: str, max_len: int = 96) -> str:
 
 def normalize_space(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", html.unescape(text or "")).strip()
+
+
+def looks_like_doi(value: str) -> bool:
+    return bool(re.match(r"(?i)^10\.\d{4,9}/\S+$", (value or "").strip()))
+
+
+def is_http_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(value or "")
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def ensure_safe_open_url(url: str) -> str:
+    if not is_http_url(url):
+        raise ValueError(f"Refusing to open non-HTTP URL: {url}")
+    if PRIVATE_URL_RE.search(url):
+        raise ValueError("Refusing to open URL containing embedded credentials.")
+    return url
+
+
+def build_proxy_url(proxy_prefix: str, target_url: str) -> str:
+    target = ensure_safe_open_url(target_url)
+    prefix = (proxy_prefix or "").strip()
+    if not prefix:
+        return ""
+    ensure_safe_open_url(prefix)
+    parsed = urllib.parse.urlparse(prefix)
+    query_keys = {key.lower() for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
+    if "=" in (parsed.query or "") and "url" not in query_keys and not prefix.endswith(("=", "%3D")):
+        separator = "&" if parsed.query else "?"
+        return prefix + separator + "url=" + urllib.parse.quote(target, safe="")
+    if prefix.endswith(("=", "%3D")):
+        return prefix + urllib.parse.quote(target, safe="")
+    if parsed.query:
+        separator = "&" if not prefix.endswith(("&", "?")) else ""
+        return prefix + separator + "url=" + urllib.parse.quote(target, safe="")
+    if prefix.endswith(("/", "?")):
+        return prefix + urllib.parse.quote(target, safe="")
+    return prefix + urllib.parse.quote(target, safe="")
+
+
+def open_url_in_browser(url: str) -> bool:
+    return webbrowser.open(ensure_safe_open_url(url), new=2)
 
 
 def compact_title_key(title: Optional[str]) -> str:
@@ -1138,7 +1203,12 @@ def build_access_plan(record: Dict[str, Any], dl: Dict[str, Any], email: str = "
         alternatives.append({"source": "scholar_query", "url": f"https://scholar.google.com/scholar?q={urllib.parse.quote(title)}", "action": "check_all_versions"})
 
     alternatives.append({"source": "manual_user_pdf", "action": "ask_user_to_provide_pdf_or_export_from_library"})
-    alternatives.append({"source": "institutional_access", "action": "open_via_library_proxy_or_publisher_if_user_has_access"})
+    alternatives.append(
+        {
+            "source": "institutional_access",
+            "action": "run institutional-open to open DOI/publisher/library-proxy pages, then ingest the user-downloaded PDF",
+        }
+    )
     alternatives.append({"source": "interlibrary_loan", "action": "request_copy_through_library_or_author"})
 
     deduped = []
@@ -1158,10 +1228,160 @@ def build_access_plan(record: Dict[str, Any], dl: Dict[str, Any], email: str = "
         "alternatives": deduped,
         "next_steps": [
             "Try listed OA/preprint/repository URLs first.",
-            "If you have institutional access, download the publisher PDF manually and rerun ingest-pdf.",
+            "If you have institutional access, run institutional-open, log in manually in your browser, download the PDF, and ingest it.",
             "If no legal copy is available, request author copy or interlibrary loan.",
         ],
     }
+
+
+def record_access_targets(record: Dict[str, Any]) -> List[Dict[str, str]]:
+    targets: List[Dict[str, str]] = []
+    if record.get("doi"):
+        targets.append({"source": "doi_landing_page", "url": f"https://doi.org/{record['doi']}"})
+    for source, key in (("record_url", "url"), ("record_pdf_url", "pdf_url")):
+        url = str(record.get(key) or "")
+        if url and is_http_url(url):
+            targets.append({"source": source, "url": url})
+    if record.get("arxiv_id"):
+        targets.append({"source": "arxiv", "url": f"https://arxiv.org/pdf/{record['arxiv_id']}"})
+    if record.get("pmcid"):
+        targets.append({"source": "pmc", "url": f"https://pmc.ncbi.nlm.nih.gov/articles/{record['pmcid']}/"})
+    deduped = []
+    seen = set()
+    for target in targets:
+        url = target["url"]
+        if url in seen:
+            continue
+        try:
+            ensure_safe_open_url(url)
+        except ValueError:
+            continue
+        deduped.append(target)
+        seen.add(url)
+    return deduped
+
+
+def candidate_institutional_urls(record: Dict[str, Any], proxy_prefix: str = "") -> List[Dict[str, str]]:
+    candidates: List[Dict[str, str]] = []
+    for target in record_access_targets(record):
+        candidates.append({"source": target["source"], "url": target["url"], "mode": "direct"})
+        if proxy_prefix and target["source"] in {"doi_landing_page", "record_url"}:
+            try:
+                candidates.append({"source": target["source"], "url": build_proxy_url(proxy_prefix, target["url"]), "mode": "library_proxy"})
+            except ValueError:
+                pass
+    deduped = []
+    seen = set()
+    for candidate in candidates:
+        key = candidate["url"]
+        if key in seen:
+            continue
+        deduped.append(candidate)
+        seen.add(key)
+    return deduped
+
+
+def pdf_snapshot(download_dir: Path) -> Dict[str, Tuple[int, int]]:
+    if not download_dir.exists():
+        return {}
+    snapshot = {}
+    for path in download_dir.glob("*.pdf"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        snapshot[str(path.resolve())] = (int(stat.st_mtime_ns), int(stat.st_size))
+    return snapshot
+
+
+def wait_for_new_pdf(download_dir: Path, before: Dict[str, Tuple[int, int]], timeout: int = 600, settle_seconds: float = 2.0) -> Optional[Path]:
+    deadline = time.time() + max(timeout, 1)
+    last_seen: Dict[str, Tuple[int, int, float]] = {}
+    while time.time() < deadline:
+        for path in download_dir.glob("*.pdf"):
+            try:
+                resolved = str(path.resolve())
+                stat = path.stat()
+            except OSError:
+                continue
+            current = (int(stat.st_mtime_ns), int(stat.st_size))
+            previous = before.get(resolved)
+            if previous == current:
+                continue
+            seen_mtime, seen_size, first_seen = last_seen.get(resolved, (0, -1, time.time()))
+            if seen_mtime == current[0] and seen_size == current[1] and time.time() - first_seen >= settle_seconds and current[1] > 1024:
+                return path
+            last_seen[resolved] = (current[0], current[1], first_seen if seen_size == current[1] else time.time())
+        time.sleep(1)
+    return None
+
+
+def write_institutional_access_plan(
+    record: Dict[str, Any],
+    out_dir: Path,
+    candidates: Sequence[Dict[str, str]],
+    download_dir: Path,
+    opened: Sequence[Dict[str, Any]],
+    imported: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    downloads_dir = out_dir / "downloads"
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    slug = safe_slug(record.get("title") or record.get("id") or "paper")
+    json_path = downloads_dir / f"{slug}.institutional-access.json"
+    md_path = downloads_dir / f"{slug}.institutional-access.md"
+    ingest_command = (
+        f'python scripts/paper_research_downloader.py ingest-pdf "<downloaded.pdf>" '
+        f'--identifier "{record.get("doi") or record.get("arxiv_id") or record.get("pmid") or record.get("pmcid") or record.get("url") or record.get("id") or ""}"'
+    )
+    plan = {
+        "status": "imported" if imported and imported.get("status") == "ok" else "waiting_for_user_download",
+        "legal_only": True,
+        "user_mediated": True,
+        "credentials_handling": {
+            "agent_enters_credentials": False,
+            "agent_reads_cookies": False,
+            "agent_stores_credentials": False,
+            "safe_storage": "Use the user's browser or a local password manager only. Do not place usernames, passwords, cookies, or sessions in SKILL.md, config.local.json, git, or release assets.",
+        },
+        "record": {
+            "id": record.get("id"),
+            "title": record.get("title"),
+            "doi": record.get("doi"),
+            "arxiv_id": record.get("arxiv_id"),
+            "pmid": record.get("pmid"),
+            "pmcid": record.get("pmcid"),
+            "url": record.get("url"),
+        },
+        "download_dir": str(download_dir.resolve()),
+        "candidate_urls": list(candidates),
+        "opened": list(opened),
+        "manual_ingest_command": ingest_command,
+        "imported": imported or {},
+        "next_steps": [
+            "Open one of the candidate URLs in your own browser.",
+            "Log in through your institution only if you are authorized.",
+            "Download the PDF manually into the watched download directory.",
+            "Run ingest-pdf on the downloaded file if automatic ingest was not used.",
+        ],
+    }
+    json_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [
+        f"# Institutional Access: {record.get('title') or record.get('id') or 'Paper'}",
+        "",
+        "User-mediated institutional access only. The agent must not enter credentials, read cookies, store sessions, or bypass publisher access controls.",
+        "",
+        "## Candidate URLs",
+        "",
+    ]
+    for item in candidates:
+        lines.append(f"- {item.get('mode')}: {item.get('source')} - {item.get('url')}")
+    lines.extend(["", "## Manual Download", "", f"- Download directory: `{download_dir.resolve()}`", f"- Ingest command: `{ingest_command}`"])
+    if imported:
+        lines.extend(["", "## Imported PDF", "", f"- Status: {imported.get('status')}", f"- Path: {imported.get('pdf_path') or imported.get('download', {}).get('pdf_path') or ''}"])
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    plan["path"] = str(json_path.resolve())
+    plan["markdown_path"] = str(md_path.resolve())
+    return plan
 
 
 def semantic_by_identifier(identifier: str, api_key: str = "") -> Dict[str, Any]:
@@ -1255,6 +1475,10 @@ def resolve_identifier(identifier: str, email: str = "", s2_key: str = "", ncbi_
         parsed_path = Path(urllib.parse.urlparse(identifier).path)
         records.append(make_record(title=parsed_path.name or identifier, url=identifier, pdf_url=identifier if parsed_path.suffix.lower() == ".pdf" else "", sources=["url"]))
         tried.append({"source": "url", "status": "direct"})
+
+    if not records and doi:
+        records.append(make_record(title=doi, doi=doi, url=f"https://doi.org/{doi}", sources=["doi_fallback"]))
+        tried.append({"source": "doi_fallback", "status": "metadata_stub"})
 
     merged = merge_records(records)
     record = merged[0] if merged else make_record(title=identifier, url=identifier, sources=["manual"])
@@ -2228,6 +2452,10 @@ def apply_config_defaults(args: argparse.Namespace) -> Dict[str, Any]:
         args.resume = bool(config.get("resume", True))
     if hasattr(args, "zotero_api") and not getattr(args, "zotero_api", ""):
         args.zotero_api = config.get("zotero_local_api") or DEFAULT_CONFIG["zotero_local_api"]
+    if hasattr(args, "proxy_prefix") and not getattr(args, "proxy_prefix", ""):
+        args.proxy_prefix = config.get("institutional_proxy_prefix") or ""
+    if hasattr(args, "download_dir") and not getattr(args, "download_dir", ""):
+        args.download_dir = config.get("download_dir") or str(Path.home() / "Downloads")
     return config
 
 
@@ -2499,6 +2727,99 @@ def run_ingest_pdf(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_institutional_open(args: argparse.Namespace) -> int:
+    config = apply_config_defaults(args)
+    out_dir = Path(args.out) if args.out else default_output_dir(config, "institutional", args.identifier)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    download_dir = Path(args.download_dir).expanduser() if args.download_dir else default_download_dir(config)
+    download_dir.mkdir(parents=True, exist_ok=True)
+    email = args.email or ""
+    s2_key = args.s2_key or ""
+    ncbi_key = args.ncbi_key or ""
+    record, manifest = resolve_identifier(args.identifier, email=email, s2_key=s2_key, ncbi_key=ncbi_key)
+    candidates = candidate_institutional_urls(record, proxy_prefix=args.proxy_prefix)
+    if not candidates:
+        candidates = [{"source": "manual", "url": args.identifier, "mode": "direct"}] if is_http_url(args.identifier) else []
+
+    opened: List[Dict[str, Any]] = []
+    before = pdf_snapshot(download_dir)
+    for candidate in candidates[: max(args.open_limit, 0)]:
+        url = candidate.get("url") or ""
+        item = dict(candidate)
+        if args.no_open:
+            item["opened"] = False
+            item["reason"] = "no_open"
+        else:
+            try:
+                item["opened"] = bool(open_url_in_browser(url))
+            except Exception as exc:  # noqa: BLE001 - browser opening is best effort
+                item["opened"] = False
+                item["error"] = str(exc)
+        opened.append(item)
+
+    imported: Optional[Dict[str, Any]] = None
+    if args.wait_for_pdf:
+        found = wait_for_new_pdf(download_dir, before, timeout=args.timeout)
+        if found and args.ingest_downloaded:
+            ingest_args = argparse.Namespace(
+                config=args.config,
+                pdf=str(found),
+                identifier=args.identifier,
+                doi="",
+                arxiv="",
+                title=args.title or "",
+                author="",
+                year=None,
+                email=args.email,
+                s2_key=args.s2_key,
+                ncbi_key=args.ncbi_key,
+                out=str(out_dir),
+                resume=args.resume,
+                no_parse=args.no_parse,
+                ocr=args.ocr,
+                extract_figures=args.extract_figures,
+                vault=args.vault,
+                note_folder=args.note_folder,
+                write_notes=args.write_notes,
+                tag=args.tag,
+                zotero_check=args.zotero_check,
+                zotero_api=args.zotero_api,
+            )
+            rc = run_ingest_pdf(ingest_args)
+            imported = {"status": "ok" if rc == 0 else "failed", "source_pdf": str(found.resolve()), "return_code": rc}
+        elif found:
+            imported = {"status": "downloaded_not_ingested", "source_pdf": str(found.resolve())}
+        else:
+            imported = {"status": "timeout", "timeout": args.timeout}
+
+    access_plan = write_institutional_access_plan(record, out_dir, candidates, download_dir, opened, imported=imported)
+    manifest.update(
+        {
+            "version": VERSION,
+            "created": iso_now(),
+            "institutional_access": access_plan,
+            "credential_policy": "user_browser_only_no_agent_storage_no_cookies_no_passwords",
+        }
+    )
+    write_exports([record], out_dir)
+    report = write_report([record], out_dir, f"Institutional Access: {args.identifier}", manifest)
+    html_report = write_html_report([record], out_dir, f"Institutional Access: {args.identifier}", manifest)
+    manifest["report"] = str(report.resolve())
+    manifest["report_html"] = str(html_report.resolve())
+    (out_dir / "run_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    print_json(
+        {
+            "status": "ok",
+            "out_dir": str(out_dir.resolve()),
+            "record": record,
+            "candidate_urls": candidates,
+            "opened": opened,
+            "institutional_access": access_plan,
+        }
+    )
+    return 0
+
+
 def run_config_init(args: argparse.Namespace) -> int:
     path = Path(args.path).expanduser() if args.path else skill_config_path()
     write_default_config(path, overwrite=args.force)
@@ -2548,9 +2869,43 @@ def run_check_env(args: argparse.Namespace) -> int:
     return 0
 
 
+def scan_private_data(root: Path) -> List[Dict[str, str]]:
+    findings: List[Dict[str, str]] = []
+    skip_parts = {"__pycache__", ".pytest_cache", "dist"}
+    text_suffixes = {".md", ".py", ".yaml", ".yml", ".json", ".txt", ".html", ".css", ".js", ".toml", ".ini", ".cfg"}
+    for path in root.rglob("*"):
+        rel = path.relative_to(root)
+        if set(rel.parts) & skip_parts:
+            continue
+        if path.name in PRIVATE_ARTIFACT_NAMES:
+            continue
+        if not path.is_file() or path.suffix.lower() not in text_suffixes:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = path.read_text(encoding="utf-8-sig")
+            except UnicodeDecodeError:
+                continue
+        if PRIVATE_URL_RE.search(text):
+            findings.append({"path": str(rel), "kind": "url_embedded_credentials"})
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            for match in PRIVATE_VALUE_RE.finditer(line):
+                value = (match.group(2) or "").strip().strip("'\"")
+                if value.lower() in PLACEHOLDER_VALUES or value.startswith("<") or value.startswith("$"):
+                    continue
+                findings.append({"path": str(rel), "line": str(line_no), "kind": "private_value", "key": match.group(1)})
+    return findings
+
+
 def run_package(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir or SKILL_DIR / "dist").resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    findings = scan_private_data(SKILL_DIR)
+    if findings and not getattr(args, "allow_private_findings", False):
+        print_json({"status": "blocked", "reason": "private_data_scan_failed", "findings": findings})
+        return 2
     zip_path = out_dir / f"paper-research-downloader-v{VERSION}.zip"
     exclude_names = {"config.local.json", "__pycache__", ".pytest_cache", "dist"}
     exclude_suffixes = {".pyc", ".pyo"}
@@ -2576,6 +2931,7 @@ def run_package(args: argparse.Namespace) -> int:
         "file_count": len(files),
         "files": files,
         "excluded": sorted(exclude_names),
+        "private_scan": {"status": "ok", "findings": []},
     }
     release_json = out_dir / f"paper-research-downloader-v{VERSION}.release.json"
     release_json.write_text(json.dumps(release, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -2585,11 +2941,11 @@ def run_package(args: argparse.Namespace) -> int:
             [
                 f"# paper-research-downloader v{VERSION}",
                 "",
-                "- Added paywall-aware lawful access plans for records without open full text.",
-                "- Added Unpaywall all-location, arXiv title-match, and CORE candidate expansion.",
-                "- Added access-plan Markdown/JSON outputs and report/dashboard links.",
-                "- Improved Obsidian notes for inaccessible papers with legal next steps.",
-                "- Added release metadata with SHA256 and package file inventory.",
+                "- Added institutional-open for user-mediated institutional access through the user's own browser.",
+                "- Added library proxy URL construction, download-folder watching, and optional user-downloaded PDF ingest.",
+                "- Added institutional access Markdown/JSON plans with explicit no-credential/no-cookie handling.",
+                "- Added package-time private data scanning before release artifacts are created.",
+                "- Preserved OA-first, paywall-aware legal access plans and Obsidian ingestion.",
                 "",
                 f"SHA256: `{digest}`",
                 "",
@@ -2665,6 +3021,28 @@ def run_regression_tests(_args: Optional[argparse.Namespace] = None) -> int:
         assert any(item.get("source") == "institutional_access" for item in plan["alternatives"])
         checks.append("paywall_access_plan")
 
+        proxied = build_proxy_url("https://library.example.edu/login?url=", "https://doi.org/10.1234/paywall")
+        assert proxied == "https://library.example.edu/login?url=https%3A%2F%2Fdoi.org%2F10.1234%2Fpaywall"
+        institutional_urls = candidate_institutional_urls(paywalled, proxy_prefix="https://library.example.edu/login?url=")
+        assert any(item["mode"] == "library_proxy" for item in institutional_urls)
+        inst_plan = write_institutional_access_plan(paywalled, tmp, institutional_urls, tmp, opened=[])
+        assert Path(inst_plan["path"]).exists() and not inst_plan["credentials_handling"]["agent_stores_credentials"]
+        checks.append("institutional_access_plan")
+
+        before = pdf_snapshot(tmp)
+        new_pdf = tmp / "downloaded.pdf"
+        new_pdf.write_bytes(b"%PDF-1.4\n% test\n" + b"0" * 2048)
+        found = wait_for_new_pdf(tmp, before, timeout=3, settle_seconds=0.1)
+        assert found and found.name == "downloaded.pdf"
+        checks.append("download_dir_pdf_watcher")
+
+        private_file = tmp / "leak.md"
+        private_key = "institutional_" + "".join(["pass", "word"])
+        private_file.write_text(private_key + " = secret-value\n", encoding="utf-8")
+        findings = scan_private_data(tmp)
+        assert any(item.get("kind") == "private_value" for item in findings)
+        checks.append("private_data_scan")
+
         env_args = argparse.Namespace(config="", zotero=False, zotero_api="")
         assert run_check_env(env_args) == 0
         checks.append("check_env")
@@ -2724,6 +3102,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     package = sub.add_parser("package", help="Create an uploadable zip package for this skill.")
     package.add_argument("--out-dir", default="", help="Output directory; defaults to <skill>/dist.")
+    package.add_argument("--allow-private-findings", action="store_true", help=argparse.SUPPRESS)
     package.set_defaults(func=run_package)
 
     check_env = sub.add_parser("check-env", help="Diagnose optional parsers, OCR tools, API keys, and local Zotero access.")
@@ -2822,6 +3201,33 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--tag", action="append", default=["paper"], help="Obsidian tag; repeatable.")
     add_zotero_args(ingest)
     ingest.set_defaults(func=run_ingest_pdf)
+
+    institutional = sub.add_parser("institutional-open", help="Open lawful institutional access URLs for user-mediated login/download, then optionally ingest the downloaded PDF.")
+    institutional.add_argument("--config", default="", help="Optional config.local.json path.")
+    institutional.add_argument("identifier", help="DOI, arXiv ID/URL, PMID, PMCID, or publisher URL.")
+    institutional.add_argument("--proxy-prefix", default="", help="Library proxy prefix, for example https://proxy.school.edu/login?url=")
+    institutional.add_argument("--download-dir", default="", help="Directory where the user will manually save the PDF; defaults to config or Downloads.")
+    institutional.add_argument("--wait-for-pdf", action="store_true", help="Wait for a newly downloaded PDF in --download-dir.")
+    institutional.add_argument("--ingest-downloaded", action="store_true", help="After --wait-for-pdf finds a PDF, run ingest-pdf automatically.")
+    institutional.add_argument("--timeout", type=int, default=600, help="Seconds to wait for a new PDF when --wait-for-pdf is used.")
+    institutional.add_argument("--open-limit", type=int, default=2, help="Maximum candidate URLs to open automatically.")
+    institutional.add_argument("--no-open", action="store_true", help="Print/write candidate URLs without opening a browser.")
+    institutional.add_argument("--title", default="", help="Optional title override when ingesting a manually downloaded PDF.")
+    institutional.add_argument("--email", default="", help="Email for Unpaywall/OpenAlex polite pool.")
+    institutional.add_argument("--s2-key", default="", help="Semantic Scholar API key.")
+    institutional.add_argument("--ncbi-key", default="", help="NCBI API key.")
+    institutional.add_argument("--out", default="", help="Output directory.")
+    institutional.add_argument("--resume", dest="resume", action="store_true", default=None, help="Reuse completed per-paper manifests.")
+    institutional.add_argument("--no-resume", dest="resume", action="store_false", help="Ignore completed per-paper manifests.")
+    institutional.add_argument("--no-parse", action="store_true", help="Ingest PDF but skip text parsing.")
+    institutional.add_argument("--ocr", action="store_true", help="Try OCR fallback with ocrmypdf when parse quality is low.")
+    institutional.add_argument("--extract-figures", action="store_true", help="Export a few page-preview images for reader workflows.")
+    institutional.add_argument("--vault", default="", help="Obsidian vault root for notes.")
+    institutional.add_argument("--note-folder", default="02_literature", help="Folder inside vault for notes.")
+    institutional.add_argument("--write-notes", action="store_true", help="Write note into <out>/notes when no vault is supplied.")
+    institutional.add_argument("--tag", action="append", default=["paper"], help="Obsidian tag; repeatable.")
+    add_zotero_args(institutional)
+    institutional.set_defaults(func=run_institutional_open)
 
     regression = sub.add_parser("test", help="Run offline regression tests for merge, exports, reports, notes, inputs, and packaging.")
     regression.set_defaults(func=run_regression_tests)

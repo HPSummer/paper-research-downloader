@@ -1,7 +1,6 @@
 interface:
   display_name: "Paper Research Downloader"
-  short_description: "Search, download, parse, and ingest papers."
-  default_prompt: "Use $paper-research-downloader to search a topic, download open full texts, and create Obsidian literature notes."
+  short_description: "Search, download, parse, ingest, and stage lawful institutional access."
+  default_prompt: "Use $paper-research-downloader to search papers, download open full texts, stage user-mediated institutional access when needed, and create Obsidian literature notes."
 policy:
   allow_implicit_invocation: true
-

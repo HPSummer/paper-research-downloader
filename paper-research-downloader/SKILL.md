@@ -1,6 +1,6 @@
 ---
 name: paper-research-downloader
-description: Search, resolve, download, parse, batch-process, audit, and ingest research papers for Codex or Claude. Use when the user wants paper discovery, literature search, DOI/arXiv/PMID/PMCID resolution, open-access PDF download, paywall-aware lawful access plans, local PDF ingestion, mixed identifier batch download, full-text parsing, PMC XML fallback, BibTeX/CSV/RIS/CSL-JSON export, Zotero duplicate checks, dependency diagnostics, resumable cached runs, duplicate-aware Obsidian literature notes with YAML frontmatter, tags, and wiki links. Trigger on requests such as find papers, download papers, paywalled paper, publisher paywall, arXiv PDF, DOI to PDF, PMID/PMC full text, literature set, paper notes, Zotero check, Obsidian paper workflow, wenxian jiansuo, xiazai lunwen, lunwen ruku, lunwen biji, or when combining paper-lookup, PaperScribe, paper-garden, research-papers, and paper-search-pro style workflows.
+description: Search, resolve, download, parse, batch-process, audit, and ingest research papers for Codex or Claude. Use when the user wants paper discovery, literature search, DOI/arXiv/PMID/PMCID resolution, open-access PDF download, paywall-aware lawful access plans, user-mediated institutional access through the user's own browser, local PDF ingestion, mixed identifier batch download, full-text parsing, PMC XML fallback, BibTeX/CSV/RIS/CSL-JSON export, Zotero duplicate checks, dependency diagnostics, resumable cached runs, duplicate-aware Obsidian literature notes with YAML frontmatter, tags, and wiki links. Trigger on requests such as find papers, download papers, paywalled paper, publisher paywall, institutional login, library proxy, arXiv PDF, DOI to PDF, PMID/PMC full text, literature set, paper notes, Zotero check, Obsidian paper workflow, wenxian jiansuo, xiazai lunwen, lunwen ruku, lunwen biji, or when combining paper-lookup, PaperScribe, paper-garden, research-papers, and paper-search-pro style workflows.
 ---
 
 # Paper Research Downloader
@@ -16,6 +16,8 @@ Use this skill as a portable paper acquisition pipeline for Codex and Claude:
 5. Export `results.json`, Excel-friendly `papers.csv`, `papers.bib`, `papers.ris`, `papers.csl.json`, `report.md`, `report.html`, download manifests, and Obsidian-ready notes.
 
 Do not use piracy sources or bypass paywalls. Use open-access locations, arXiv, PMC, publisher OA files, author pages, repository copies, institutional/manual user access, or user-provided PDFs.
+
+Never write institutional usernames, passwords, cookies, sessions, proxy credentials, or tokens into `SKILL.md`, bundled resources, Git, release zips, public issue/PR text, or uploaded artifacts. If the user provides an institutional account, treat it as transient user-secret context only: the user must type it into their own browser or password manager. Do not automate credential entry, scrape browser sessions, or mass-download through institutional access.
 
 ## First Step
 
@@ -41,7 +43,7 @@ For first use, create a local config:
 python .\scripts\paper_research_downloader.py config-init
 ```
 
-Edit `config.local.json` if the user wants default `vault`, `email`, `cache_dir`, `default_out_dir`, tags, source list, resume behavior, or duplicate policy. Do not include `config.local.json` in public uploads.
+Edit `config.local.json` if the user wants default `vault`, `email`, `cache_dir`, `default_out_dir`, tags, source list, resume behavior, `institutional_proxy_prefix`, `download_dir`, or duplicate policy. Do not include `config.local.json` in public uploads. Do not store institutional account usernames/passwords/cookies in it.
 
 For long runs, also set `request_delay` and `batch_delay` in `config.local.json`, or pass `--delay` to `batch`.
 
@@ -64,6 +66,7 @@ python .\scripts\paper_research_downloader.py check-env --zotero
 | Obsidian paper library | Use `--vault` and keep notes under `02_literature` unless the user overrides. |
 | Zotero duplicate audit | Add `--zotero-check`; keep `zotero_matches.json`. |
 | Paywalled publisher paper | Let the run generate `*.access-plan.json` and `*.access-plan.md`; then use legal alternatives or `ingest-pdf` with a user-provided copy. |
+| Institutionally accessible paper | Run `institutional-open`; let the user log in manually in their own browser; optionally watch the download folder and ingest the downloaded PDF. |
 | Repeated or long batch | Use cache/resume defaults, `--delay`, and `run_manifest.json`. |
 | Deep reading/translation | Use this skill to acquire files, then hand off to `nature-reader` or `paper-scribe` style block reading. |
 | Systematic/scoping review | Use this skill for acquisition, then use `literature-review`/`paper-search-pro` style screening and PRISMA logging. |
@@ -99,6 +102,29 @@ If Unpaywall is needed for DOI download, pass `--email` or set `UNPAYWALL_EMAIL`
 For PMCID records, if PDF download fails but PMC XML is available, the helper writes `<paper>.pmc.parsed.md` and marks evidence as full text.
 
 For paywalled publisher records, the helper writes an access plan with lawful alternatives: all Unpaywall OA locations, arXiv title matches, CORE candidates, DOI landing page, Google/Scholar all-version queries, institutional access, author copy, interlibrary loan, and manual `ingest-pdf`.
+
+### 3.1 Institution-Mediated Access Bridge
+
+Use this only when the user has legitimate institutional access and wants the agent to stage the workflow without seeing credentials:
+
+```powershell
+python .\scripts\paper_research_downloader.py institutional-open "10.xxxx/yyyy" `
+  --proxy-prefix "https://library.example.edu/login?url=" `
+  --download-dir "$env:USERPROFILE\Downloads" `
+  --wait-for-pdf `
+  --ingest-downloaded `
+  --write-notes
+```
+
+The command resolves the identifier, writes `<paper>.institutional-access.json` and `<paper>.institutional-access.md`, opens DOI/publisher/library-proxy URLs when allowed by the environment, waits for a new PDF in the chosen download directory, and can pass that user-downloaded PDF to `ingest-pdf`.
+
+Hard boundaries:
+
+- The user logs in manually in their browser.
+- Do not ask the user to paste passwords into the command line or config files.
+- Do not read cookies, browser profiles, SSO tokens, proxy sessions, or password-manager data.
+- Do not use institutional access for unattended bulk harvesting.
+- If browser opening is unavailable, run with `--no-open` and give the user the generated URLs.
 
 ### 4. Batch Download A Literature Set
 
@@ -201,6 +227,8 @@ The helper writes:
     <paper>.pmc.parsed.md
     <paper>.access-plan.json
     <paper>.access-plan.md
+    <paper>.institutional-access.json
+    <paper>.institutional-access.md
     <paper>.manifest.json
     <paper>_assets/
       page-001.png
@@ -208,7 +236,7 @@ The helper writes:
     <paper>.md
 ```
 
-Each per-paper manifest includes source candidates tried, retry attempts, download status, SHA256, parser, page count, word count, parse quality, optional OCR/page-preview outputs, optional access plan, `read_plan`, and sentinel.
+Each per-paper manifest includes source candidates tried, retry attempts, download status, SHA256, parser, page count, word count, parse quality, optional OCR/page-preview outputs, optional access plan, optional institutional access plan, `read_plan`, and sentinel.
 
 The helper also maintains a PDF cache under `cache_dir` when configured. Cached PDFs are reused before network download.
 
@@ -233,7 +261,7 @@ Create an uploadable package with:
 python scripts/paper_research_downloader.py package
 ```
 
-The zip excludes `config.local.json`, caches, and `dist/`. The package command also writes release metadata and release notes beside the zip.
+The zip excludes `config.local.json`, caches, and `dist/`. The package command also writes release metadata and release notes beside the zip. It blocks packaging if bundled text files contain likely passwords, cookies, sessions, tokens, or embedded URL credentials.
 
 For GitHub publishing, keep repository-level docs outside the skill folder. The uploadable skill itself should remain only `SKILL.md`, `agents/`, `references/`, and `scripts/`.
 
@@ -247,4 +275,4 @@ python scripts/paper_research_downloader.py self-test
 python C:\Users\Admin\.codex\skills\.system\skill-creator\scripts\quick_validate.py <path-to-this-skill>
 ```
 
-`test` is offline and covers DOI/arXiv merge behavior, CSV/RIS/CSL export, HTML report generation, Obsidian duplicate skipping, `.txt`/`.csv`/`.json` identifier parsing, PMC XML parsing, Zotero report safety, paywall access plans, environment diagnostics, and package privacy exclusions.
+`test` is offline and covers DOI/arXiv merge behavior, CSV/RIS/CSL export, HTML report generation, Obsidian duplicate skipping, `.txt`/`.csv`/`.json` identifier parsing, PMC XML parsing, Zotero report safety, paywall access plans, institutional access plans, download-folder watching, private-data scanning, environment diagnostics, and package privacy exclusions.

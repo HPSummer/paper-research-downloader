@@ -12,9 +12,12 @@ For a known identifier:
 6. DOI/title -> Semantic Scholar `openAccessPdf`.
 7. Title -> arXiv exact title match and CORE candidate URLs.
 8. DOI landing page -> metadata plus access plan unless a direct public PDF is exposed.
-9. Local user PDF -> parse directly.
+9. Institution-mediated bridge -> open DOI/publisher/library-proxy URLs in the user's browser; user logs in and downloads manually; ingest the resulting local PDF.
+10. Local user PDF -> parse directly.
 
 Never use Sci-Hub, credential bypasses, shadow mirrors, or institutional access scraping. For paywalled papers, generate a lawful access plan instead of trying to bypass the wall.
+
+Institutional accounts are user secrets. Do not write usernames, passwords, cookies, sessions, proxy credentials, or tokens into skill files, `config.local.json`, command lines, logs, Git commits, release zips, or uploaded artifacts. The only supported institutional flow is user-mediated browser login followed by local PDF ingestion.
 
 ## Evidence Labels
 
@@ -97,12 +100,15 @@ Body sections:
 | `S2_API_KEY` | Optional Semantic Scholar higher rate limits. |
 | `NCBI_API_KEY` | Optional PubMed/PMC higher rate limits. |
 
+Do not add environment variables for institutional passwords or browser sessions.
+
 ## Failure Handling
 
 | Failure | Response |
 |---|---|
 | No PDF found | Keep metadata and mark `[Abstract only]` or `[Metadata only]`. |
 | Publisher paywall | Write `*.access-plan.json` and `*.access-plan.md`; list lawful alternatives and manual next steps. |
+| User has institutional access | Run `institutional-open`; open DOI/publisher/proxy URLs; user logs in manually; watch download folder and ingest the downloaded PDF if requested. |
 | PMCID PDF unavailable | Try PMC XML and write `<paper>.pmc.parsed.md`; mark `[Full text]` when parse succeeds. |
 | PDF download returns HTML | Save no PDF; keep landing URL in manifest. |
 | Parser unavailable | Keep PDF path; tell the agent to install `pymupdf` or `pypdf` if parsing is needed. |
@@ -184,6 +190,42 @@ Access-plan files are written under `downloads/` for inaccessible papers:
 | `<paper>.access-plan.md` | Human-readable next-step checklist for OA/preprint/manual access. |
 
 Access plans may include Unpaywall locations, DOI landing page, arXiv title matches, CORE candidates, search queries for author repository copies, institutional access, author request, interlibrary loan, and `ingest-pdf` with a user-provided copy.
+
+## Institution-Mediated Access
+
+Use:
+
+```bash
+python scripts/paper_research_downloader.py institutional-open "10.xxxx/yyyy" \
+  --proxy-prefix "https://library.example.edu/login?url=" \
+  --download-dir "$HOME/Downloads" \
+  --wait-for-pdf \
+  --ingest-downloaded
+```
+
+Behavior:
+
+| Step | What the script may do | What it must not do |
+|---|---|---|
+| Resolve | Resolve DOI/URL/arXiv/PMID/PMCID and write candidate access URLs. | Guess private credentials. |
+| Open | Open safe `http`/`https` DOI, publisher, or proxy URLs. | Open URLs with embedded credentials or non-web schemes. |
+| Login | Wait while the user logs in manually. | Type passwords, read password managers, collect cookies, or inspect SSO sessions. |
+| Download | Watch a user-chosen folder for a new PDF. | Crawl publisher sites or bulk-download through institutional access. |
+| Ingest | Copy and parse the user-downloaded PDF via `ingest-pdf`. | Upload private account material or include credentials in manifests. |
+
+Generated files:
+
+| File | Purpose |
+|---|---|
+| `<paper>.institutional-access.json` | Candidate URLs, opened URL log, no-credential policy, manual ingest command, optional imported PDF result. |
+| `<paper>.institutional-access.md` | Human-readable checklist for user-mediated login/download/ingest. |
+
+Allowed config fields:
+
+| Field | Purpose |
+|---|---|
+| `institutional_proxy_prefix` | Optional library proxy URL prefix only, never username/password. |
+| `download_dir` | User-chosen folder to watch for manually downloaded PDFs. |
 
 ## Zotero Check
 
