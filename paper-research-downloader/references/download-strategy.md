@@ -7,12 +7,14 @@ For a known identifier:
 1. arXiv ID or arXiv URL -> arXiv PDF.
 2. PMCID -> PMC open PDF, then PMC XML full text if PDF is unavailable.
 3. DOI -> Unpaywall with `UNPAYWALL_EMAIL` or `--email`.
-4. DOI -> OpenAlex `best_oa_location` or `primary_location`.
-5. DOI/title -> Semantic Scholar `openAccessPdf`.
-6. DOI landing page -> metadata only unless a direct public PDF is exposed.
-7. Local user PDF -> parse directly.
+4. DOI -> all Unpaywall OA locations, not only best PDF.
+5. DOI -> OpenAlex `best_oa_location` or `primary_location`.
+6. DOI/title -> Semantic Scholar `openAccessPdf`.
+7. Title -> arXiv exact title match and CORE candidate URLs.
+8. DOI landing page -> metadata plus access plan unless a direct public PDF is exposed.
+9. Local user PDF -> parse directly.
 
-Never use Sci-Hub, credential bypasses, shadow mirrors, or institutional access scraping.
+Never use Sci-Hub, credential bypasses, shadow mirrors, or institutional access scraping. For paywalled papers, generate a lawful access plan instead of trying to bypass the wall.
 
 ## Evidence Labels
 
@@ -100,6 +102,7 @@ Body sections:
 | Failure | Response |
 |---|---|
 | No PDF found | Keep metadata and mark `[Abstract only]` or `[Metadata only]`. |
+| Publisher paywall | Write `*.access-plan.json` and `*.access-plan.md`; list lawful alternatives and manual next steps. |
 | PMCID PDF unavailable | Try PMC XML and write `<paper>.pmc.parsed.md`; mark `[Full text]` when parse succeeds. |
 | PDF download returns HTML | Save no PDF; keep landing URL in manifest. |
 | Parser unavailable | Keep PDF path; tell the agent to install `pymupdf` or `pypdf` if parsing is needed. |
@@ -172,6 +175,15 @@ The script writes:
 | `report.md` | Lightweight audit log for Codex/Claude. |
 | `report.html` | Static dashboard for browsing records, evidence labels, PDFs, parsed Markdown, and notes. |
 | `zotero_matches.json` | Duplicate-candidate audit from local Zotero when `--zotero-check` is used. |
+
+Access-plan files are written under `downloads/` for inaccessible papers:
+
+| File | Purpose |
+|---|---|
+| `<paper>.access-plan.json` | Structured lawful alternatives and reasons no full text was obtained. |
+| `<paper>.access-plan.md` | Human-readable next-step checklist for OA/preprint/manual access. |
+
+Access plans may include Unpaywall locations, DOI landing page, arXiv title matches, CORE candidates, search queries for author repository copies, institutional access, author request, interlibrary loan, and `ingest-pdf` with a user-provided copy.
 
 ## Zotero Check
 

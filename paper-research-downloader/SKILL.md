@@ -1,6 +1,6 @@
 ---
 name: paper-research-downloader
-description: Search, resolve, download, parse, batch-process, audit, and ingest research papers for Codex or Claude. Use when the user wants paper discovery, literature search, DOI/arXiv/PMID/PMCID resolution, open-access PDF download, local PDF ingestion, mixed identifier batch download, full-text parsing, PMC XML fallback, BibTeX/CSV/RIS/CSL-JSON export, Zotero duplicate checks, dependency diagnostics, resumable cached runs, duplicate-aware Obsidian literature notes with YAML frontmatter, tags, and wiki links. Trigger on requests such as find papers, download papers, arXiv PDF, DOI to PDF, PMID/PMC full text, literature set, paper notes, Zotero check, Obsidian paper workflow, wenxian jiansuo, xiazai lunwen, lunwen ruku, lunwen biji, or when combining paper-lookup, PaperScribe, paper-garden, research-papers, and paper-search-pro style workflows.
+description: Search, resolve, download, parse, batch-process, audit, and ingest research papers for Codex or Claude. Use when the user wants paper discovery, literature search, DOI/arXiv/PMID/PMCID resolution, open-access PDF download, paywall-aware lawful access plans, local PDF ingestion, mixed identifier batch download, full-text parsing, PMC XML fallback, BibTeX/CSV/RIS/CSL-JSON export, Zotero duplicate checks, dependency diagnostics, resumable cached runs, duplicate-aware Obsidian literature notes with YAML frontmatter, tags, and wiki links. Trigger on requests such as find papers, download papers, paywalled paper, publisher paywall, arXiv PDF, DOI to PDF, PMID/PMC full text, literature set, paper notes, Zotero check, Obsidian paper workflow, wenxian jiansuo, xiazai lunwen, lunwen ruku, lunwen biji, or when combining paper-lookup, PaperScribe, paper-garden, research-papers, and paper-search-pro style workflows.
 ---
 
 # Paper Research Downloader
@@ -15,7 +15,7 @@ Use this skill as a portable paper acquisition pipeline for Codex and Claude:
 4. Parse downloaded PDFs into Markdown when local parsers are available.
 5. Export `results.json`, Excel-friendly `papers.csv`, `papers.bib`, `papers.ris`, `papers.csl.json`, `report.md`, `report.html`, download manifests, and Obsidian-ready notes.
 
-Do not use piracy sources. Use open-access locations, arXiv, PMC, publisher OA files, author pages, repository copies, or user-provided PDFs.
+Do not use piracy sources or bypass paywalls. Use open-access locations, arXiv, PMC, publisher OA files, author pages, repository copies, institutional/manual user access, or user-provided PDFs.
 
 ## First Step
 
@@ -63,6 +63,7 @@ python .\scripts\paper_research_downloader.py check-env --zotero
 | Local PDF already available | Run `ingest-pdf`; enrich with DOI/arXiv metadata if supplied. |
 | Obsidian paper library | Use `--vault` and keep notes under `02_literature` unless the user overrides. |
 | Zotero duplicate audit | Add `--zotero-check`; keep `zotero_matches.json`. |
+| Paywalled publisher paper | Let the run generate `*.access-plan.json` and `*.access-plan.md`; then use legal alternatives or `ingest-pdf` with a user-provided copy. |
 | Repeated or long batch | Use cache/resume defaults, `--delay`, and `run_manifest.json`. |
 | Deep reading/translation | Use this skill to acquire files, then hand off to `nature-reader` or `paper-scribe` style block reading. |
 | Systematic/scoping review | Use this skill for acquisition, then use `literature-review`/`paper-search-pro` style screening and PRISMA logging. |
@@ -96,6 +97,8 @@ python scripts/paper_research_downloader.py resolve "PMC1234567" --out ".\papers
 If Unpaywall is needed for DOI download, pass `--email` or set `UNPAYWALL_EMAIL`.
 
 For PMCID records, if PDF download fails but PMC XML is available, the helper writes `<paper>.pmc.parsed.md` and marks evidence as full text.
+
+For paywalled publisher records, the helper writes an access plan with lawful alternatives: all Unpaywall OA locations, arXiv title matches, CORE candidates, DOI landing page, Google/Scholar all-version queries, institutional access, author copy, interlibrary loan, and manual `ingest-pdf`.
 
 ### 4. Batch Download A Literature Set
 
@@ -196,6 +199,8 @@ The helper writes:
     <paper>.pdf
     <paper>.parsed.md
     <paper>.pmc.parsed.md
+    <paper>.access-plan.json
+    <paper>.access-plan.md
     <paper>.manifest.json
     <paper>_assets/
       page-001.png
@@ -203,7 +208,7 @@ The helper writes:
     <paper>.md
 ```
 
-Each per-paper manifest includes source candidates tried, retry attempts, download status, SHA256, parser, page count, word count, parse quality, optional OCR/page-preview outputs, `read_plan`, and sentinel.
+Each per-paper manifest includes source candidates tried, retry attempts, download status, SHA256, parser, page count, word count, parse quality, optional OCR/page-preview outputs, optional access plan, `read_plan`, and sentinel.
 
 The helper also maintains a PDF cache under `cache_dir` when configured. Cached PDFs are reused before network download.
 
@@ -242,4 +247,4 @@ python scripts/paper_research_downloader.py self-test
 python C:\Users\Admin\.codex\skills\.system\skill-creator\scripts\quick_validate.py <path-to-this-skill>
 ```
 
-`test` is offline and covers DOI/arXiv merge behavior, CSV/RIS/CSL export, HTML report generation, Obsidian duplicate skipping, `.txt`/`.csv`/`.json` identifier parsing, PMC XML parsing, Zotero report safety, environment diagnostics, and package privacy exclusions.
+`test` is offline and covers DOI/arXiv merge behavior, CSV/RIS/CSL export, HTML report generation, Obsidian duplicate skipping, `.txt`/`.csv`/`.json` identifier parsing, PMC XML parsing, Zotero report safety, paywall access plans, environment diagnostics, and package privacy exclusions.

@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-VERSION = "1.2.0"
-USER_AGENT = "paper-research-downloader/1.2 (+https://github.com/openai/codex)"
+VERSION = "1.3.0"
+USER_AGENT = "paper-research-downloader/1.3 (+https://github.com/openai/codex)"
 ATOM = "{http://www.w3.org/2005/Atom}"
 NCBI_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -844,6 +844,40 @@ def parse_pmc_xml_to_markdown(xml_text: str, record: Dict[str, Any], out_dir: Pa
     }
 
 
+def write_access_plan(record: Dict[str, Any], dl: Dict[str, Any], out_dir: Path, email: str = "") -> Dict[str, Any]:
+    plan = build_access_plan(record, dl, email=email)
+    downloads_dir = out_dir / "downloads"
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    slug = safe_slug(record.get("title") or record.get("id") or "paper")
+    json_path = downloads_dir / f"{slug}.access-plan.json"
+    md_path = downloads_dir / f"{slug}.access-plan.md"
+    json_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
+    lines = [
+        f"# Access Plan: {record.get('title') or record.get('id') or 'Paper'}",
+        "",
+        "This plan lists lawful alternatives only. It does not bypass publisher paywalls.",
+        "",
+        "## Reasons",
+        "",
+    ]
+    lines.extend(f"- {reason}" for reason in plan.get("reasons") or [])
+    lines.extend(["", "## Alternatives", ""])
+    for item in plan.get("alternatives") or []:
+        label = item.get("source") or item.get("action") or "source"
+        url = item.get("url") or ""
+        action = item.get("action") or ""
+        if url:
+            lines.append(f"- {label}: {url}" + (f" ({action})" if action else ""))
+        else:
+            lines.append(f"- {label}: {action}")
+    lines.extend(["", "## Next Steps", ""])
+    lines.extend(f"- {step}" for step in plan.get("next_steps") or [])
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    plan["path"] = str(json_path.resolve())
+    plan["markdown_path"] = str(md_path.resolve())
+    return plan
+
+
 def openalex_by_doi(doi: str, email: str = "") -> Dict[str, Any]:
     if not doi:
         return {}
@@ -990,6 +1024,144 @@ def unpaywall_pdf_url(doi: str, email: str) -> Tuple[str, Dict[str, Any]]:
                 pdf_url = loc["url_for_pdf"]
                 break
     return pdf_url, data
+
+
+def unpaywall_locations(doi: str, email: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if not doi or not email:
+        return [], {}
+    try:
+        data = get_json(f"https://api.unpaywall.org/v2/{urllib.parse.quote(doi, safe='')}", params={"email": email}, retries=1)
+    except RuntimeError:
+        return [], {}
+    locations = []
+    best = data.get("best_oa_location") or {}
+    for loc in [best] + list(data.get("oa_locations") or []):
+        if not loc:
+            continue
+        url = loc.get("url_for_pdf") or loc.get("url") or loc.get("url_for_landing_page") or ""
+        if not url:
+            continue
+        locations.append(
+            {
+                "source": "unpaywall",
+                "url": url,
+                "host_type": loc.get("host_type") or "",
+                "license": loc.get("license") or "",
+                "version": loc.get("version") or "",
+                "is_best": loc == best,
+            }
+        )
+    deduped = []
+    seen = set()
+    for loc in locations:
+        if loc["url"] not in seen:
+            deduped.append(loc)
+            seen.add(loc["url"])
+    return deduped, data
+
+
+def core_search_locations(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    query = record.get("doi") or record.get("title") or ""
+    if not query:
+        return []
+    try:
+        data = get_json("https://api.core.ac.uk/v3/search/works", params={"q": query, "limit": 5}, retries=0, timeout=20)
+    except RuntimeError:
+        return []
+    locations = []
+    target_title = compact_title_key(record.get("title"))
+    target_title_text = normalize_space(record.get("title")).lower()
+    target_doi = normalize_doi(record.get("doi"))
+    for item in data.get("results") or []:
+        item_title = compact_title_key(item.get("title"))
+        item_title_text = normalize_space(item.get("title")).lower()
+        item_doi = normalize_doi(item.get("doi") or "")
+        if target_doi and item_doi and item_doi != target_doi:
+            continue
+        if target_title and item_title and target_title != item_title:
+            target_tokens = set(re.findall(r"[a-z0-9]{4,}", target_title_text))
+            item_tokens = set(re.findall(r"[a-z0-9]{4,}", item_title_text))
+            overlap = len(target_tokens & item_tokens) / max(len(target_tokens), 1)
+            if overlap < 0.75:
+                continue
+        for url in [item.get("downloadUrl"), item.get("fullTextLink")]:
+            if url:
+                locations.append({"source": "core", "url": url, "title": item.get("title") or "", "year": item.get("yearPublished") or ""})
+    return locations
+
+
+def arxiv_title_locations(record: Dict[str, Any]) -> List[Dict[str, Any]]:
+    title = normalize_space(record.get("title"))
+    if not title or record.get("arxiv_id"):
+        return []
+    try:
+        records = search_arxiv(f'ti:"{title}"', limit=3, year_min=None)
+    except Exception:
+        return []
+    locations = []
+    title_key = compact_title_key(title)
+    for rec in records:
+        if rec.get("pdf_url") and compact_title_key(rec.get("title")) == title_key:
+            locations.append({"source": "arxiv_title_match", "url": rec["pdf_url"], "arxiv_id": rec.get("arxiv_id") or "", "title": rec.get("title") or ""})
+    return locations
+
+
+def build_access_plan(record: Dict[str, Any], dl: Dict[str, Any], email: str = "") -> Dict[str, Any]:
+    tried = dl.get("tried") or []
+    reasons = []
+    if not dl.get("candidate_count"):
+        reasons.append("no_open_pdf_candidate")
+    if any(item.get("status") in {"not_pdf", "failed"} for item in tried):
+        reasons.append("candidate_pdf_failed_or_not_pdf")
+    if record.get("doi") and not email:
+        reasons.append("unpaywall_email_missing")
+
+    alternatives: List[Dict[str, Any]] = []
+    if record.get("doi"):
+        if email:
+            locs, data = unpaywall_locations(record["doi"], email)
+            alternatives.extend(locs)
+            if data and not locs:
+                reasons.append("unpaywall_no_oa_location")
+        alternatives.append({"source": "doi_landing_page", "url": f"https://doi.org/{record['doi']}", "action": "open_landing_page"})
+    if record.get("arxiv_id"):
+        alternatives.append({"source": "arxiv", "url": f"https://arxiv.org/pdf/{record['arxiv_id']}", "action": "download_preprint"})
+    if record.get("pmcid"):
+        alternatives.append({"source": "pmc", "url": f"https://pmc.ncbi.nlm.nih.gov/articles/{record['pmcid']}/", "action": "open_pmc_fulltext"})
+    alternatives.extend(arxiv_title_locations(record))
+    alternatives.extend(core_search_locations(record))
+
+    title = normalize_space(record.get("title"))
+    if title:
+        query = urllib.parse.quote(f'"{title}" filetype:pdf')
+        alternatives.append({"source": "web_search_query", "url": f"https://www.google.com/search?q={query}", "action": "search_author_repository_copy"})
+        alternatives.append({"source": "scholar_query", "url": f"https://scholar.google.com/scholar?q={urllib.parse.quote(title)}", "action": "check_all_versions"})
+
+    alternatives.append({"source": "manual_user_pdf", "action": "ask_user_to_provide_pdf_or_export_from_library"})
+    alternatives.append({"source": "institutional_access", "action": "open_via_library_proxy_or_publisher_if_user_has_access"})
+    alternatives.append({"source": "interlibrary_loan", "action": "request_copy_through_library_or_author"})
+
+    deduped = []
+    seen = set()
+    for item in alternatives:
+        key = item.get("url") or f"{item.get('source')}:{item.get('action')}"
+        if key in seen:
+            continue
+        deduped.append(item)
+        seen.add(key)
+
+    return {
+        "status": "needs_access",
+        "legal_only": True,
+        "reasons": list(dict.fromkeys(reasons)) or ["no_full_text_obtained"],
+        "landing_url": record.get("url") or (f"https://doi.org/{record['doi']}" if record.get("doi") else ""),
+        "alternatives": deduped,
+        "next_steps": [
+            "Try listed OA/preprint/repository URLs first.",
+            "If you have institutional access, download the publisher PDF manually and rerun ingest-pdf.",
+            "If no legal copy is available, request author copy or interlibrary loan.",
+        ],
+    }
 
 
 def semantic_by_identifier(identifier: str, api_key: str = "") -> Dict[str, Any]:
@@ -1199,12 +1371,21 @@ def download_pdf(record: Dict[str, Any], out_dir: Path, email: str = "", s2_key:
         pdf_url, _ = unpaywall_pdf_url(record["doi"], email)
         if pdf_url:
             candidates.append(("unpaywall", pdf_url))
+        for loc in unpaywall_locations(record["doi"], email)[0]:
+            if loc.get("url"):
+                candidates.append((f"unpaywall_{loc.get('host_type') or loc.get('version') or 'oa'}", loc["url"]))
         s2 = semantic_by_identifier(f"DOI:{record['doi']}", s2_key)
         if s2.get("pdf_url"):
             candidates.append(("semantic", s2["pdf_url"]))
         ox = openalex_by_doi(record["doi"], email)
         if ox.get("pdf_url"):
             candidates.append(("openalex", ox["pdf_url"]))
+    for loc in arxiv_title_locations(record):
+        if loc.get("url"):
+            candidates.append(("arxiv_title_match", loc["url"]))
+    for loc in core_search_locations(record):
+        if loc.get("url"):
+            candidates.append(("core", loc["url"]))
 
     seen = set()
     unique_candidates = []
@@ -1452,6 +1633,13 @@ def process_record(
         if existing:
             dl["note_duplicate"] = True
 
+    if record.get("evidence") != "Full text":
+        dl["access_plan"] = write_access_plan(record, dl, out_dir, email=email)
+        if dl.get("status") == "failed":
+            dl["status"] = "needs_access"
+        if note_dir and dl.get("note_path"):
+            append_access_plan_to_note(Path(dl["note_path"]), dl["access_plan"])
+
     manifest.update({"record": record, "download": dl})
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     dl["manifest_path"] = str(manifest_path.resolve())
@@ -1577,6 +1765,7 @@ def write_report(records: Sequence[Dict[str, Any]], out_dir: Path, title: str, m
     full = sum(1 for r in records if r.get("evidence") == "Full text")
     abstract = sum(1 for r in records if r.get("evidence") == "Abstract only")
     metadata = sum(1 for r in records if r.get("evidence") == "Metadata only")
+    needs_access = sum(1 for r in records if (r.get("download") or {}).get("access_plan"))
     failed = 0
     duplicates = 0
     for r in records:
@@ -1598,21 +1787,23 @@ def write_report(records: Sequence[Dict[str, Any]], out_dir: Path, title: str, m
         f"| Full text | {full} |",
         f"| Abstract only | {abstract} |",
         f"| Metadata only | {metadata} |",
+        f"| Needs access plan | {needs_access} |",
         f"| Failed downloads | {failed} |",
         f"| Existing Obsidian notes reused | {duplicates} |",
         "",
         "## Papers",
         "",
-        "| # | Evidence | Year | Title | DOI/arXiv/PMID | PDF | Note |",
-        "|---:|---|---:|---|---|---|---|",
+        "| # | Evidence | Year | Title | DOI/arXiv/PMID | PDF | Access plan | Note |",
+        "|---:|---|---:|---|---|---|---|---|",
     ]
     for idx, rec in enumerate(records, start=1):
         ident = rec.get("doi") or rec.get("arxiv_id") or rec.get("pmid") or rec.get("pmcid") or ""
         dl = rec.get("download") or {}
         pdf = dl.get("pdf_path") or rec.get("pdf_path") or ""
+        access = (dl.get("access_plan") or {}).get("markdown_path") or ""
         note = dl.get("note_path") or ""
         title_text = str(rec.get("title") or "").replace("|", "\\|")
-        lines.append(f"| {idx} | {rec.get('evidence') or ''} | {rec.get('year') or ''} | {title_text} | {ident} | {pdf} | {note} |")
+        lines.append(f"| {idx} | {rec.get('evidence') or ''} | {rec.get('year') or ''} | {title_text} | {ident} | {pdf} | {access} | {note} |")
     if manifest and manifest.get("source_logs"):
         lines.extend(["", "## Source Logs", "", "| Source | Status | Count/Error |", "|---|---|---|"])
         for item in manifest.get("source_logs") or []:
@@ -1628,6 +1819,7 @@ def write_html_report(records: Sequence[Dict[str, Any]], out_dir: Path, title: s
     full = sum(1 for r in records if r.get("evidence") == "Full text")
     abstract = sum(1 for r in records if r.get("evidence") == "Abstract only")
     metadata = sum(1 for r in records if r.get("evidence") == "Metadata only")
+    needs_access = sum(1 for r in records if (r.get("download") or {}).get("access_plan"))
     failed = sum(1 for r in records if (r.get("download") or {}).get("status") == "failed")
     if manifest and manifest.get("items"):
         failed += sum(1 for item in manifest.get("items") or [] if item.get("status") == "failed")
@@ -1639,6 +1831,7 @@ def write_html_report(records: Sequence[Dict[str, Any]], out_dir: Path, title: s
         pdf = dl.get("pdf_path") or rec.get("pdf_path") or ""
         note = dl.get("note_path") or ""
         parsed_path = parsed.get("parsed_path") or ""
+        access_path = (dl.get("access_plan") or {}).get("markdown_path") or ""
         rows.append(
             "<tr>"
             f"<td>{idx}</td>"
@@ -1648,6 +1841,7 @@ def write_html_report(records: Sequence[Dict[str, Any]], out_dir: Path, title: s
             f"<td>{html.escape(str(ident))}</td>"
             f"<td>{link_cell(pdf, 'PDF')}</td>"
             f"<td>{link_cell(parsed_path, 'Markdown')}</td>"
+            f"<td>{link_cell(access_path, 'Plan')}</td>"
             f"<td>{link_cell(note, 'Note')}</td>"
             "</tr>"
         )
@@ -1699,10 +1893,11 @@ a:hover {{ text-decoration: underline; }}
 <div class="metric"><div>Full text</div><div>{full}</div></div>
 <div class="metric"><div>Abstract only</div><div>{abstract}</div></div>
 <div class="metric"><div>Metadata only</div><div>{metadata}</div></div>
+<div class="metric"><div>Needs access</div><div>{needs_access}</div></div>
 <div class="metric"><div>Failed items</div><div>{failed}</div></div>
 </section>
 <h2>Papers</h2>
-<table><thead><tr><th>#</th><th>Evidence</th><th>Year</th><th>Title</th><th>Identifier</th><th>PDF</th><th>Parsed</th><th>Note</th></tr></thead><tbody>
+<table><thead><tr><th>#</th><th>Evidence</th><th>Year</th><th>Title</th><th>Identifier</th><th>PDF</th><th>Parsed</th><th>Access</th><th>Note</th></tr></thead><tbody>
 {''.join(rows)}
 </tbody></table>
 {source_logs}
@@ -1928,6 +2123,34 @@ def write_obsidian_note(
     ]
     note_path.write_text("\n".join(frontmatter + body), encoding="utf-8")
     return note_path
+
+
+def append_access_plan_to_note(note_path: Path, access_plan: Dict[str, Any]) -> None:
+    if not note_path.exists():
+        return
+    text = note_path.read_text(encoding="utf-8", errors="replace")
+    marker = "## Access Plan"
+    if marker in text:
+        return
+    lines = [
+        "",
+        marker,
+        "",
+        f"- Status: {access_plan.get('status') or 'needs_access'}",
+        f"- Plan JSON: {access_plan.get('path') or ''}",
+        f"- Plan Markdown: {access_plan.get('markdown_path') or ''}",
+        "- Legal boundary: use OA/preprint/repository/institutional/manual user PDF routes only.",
+        "",
+    ]
+    for item in (access_plan.get("alternatives") or [])[:8]:
+        source = item.get("source") or item.get("action") or "source"
+        url = item.get("url") or ""
+        action = item.get("action") or ""
+        if url:
+            lines.append(f"- {source}: {url}")
+        elif action:
+            lines.append(f"- {source}: {action}")
+    note_path.write_text(text.rstrip() + "\n" + "\n".join(lines) + "\n", encoding="utf-8")
 
 
 def read_identifier_file(path: Path) -> List[str]:
@@ -2362,10 +2585,10 @@ def run_package(args: argparse.Namespace) -> int:
             [
                 f"# paper-research-downloader v{VERSION}",
                 "",
-                "- Added `check-env` diagnostics for parser modules, PDF/OCR executables, API keys, and local Zotero.",
-                "- Added PMC XML full-text fallback when PMCID PDF download is unavailable.",
-                "- Added RIS and CSL-JSON exports beside CSV/BibTeX.",
-                "- Added local Zotero duplicate-candidate report via `--zotero-check`.",
+                "- Added paywall-aware lawful access plans for records without open full text.",
+                "- Added Unpaywall all-location, arXiv title-match, and CORE candidate expansion.",
+                "- Added access-plan Markdown/JSON outputs and report/dashboard links.",
+                "- Improved Obsidian notes for inaccessible papers with legal next steps.",
                 "- Added release metadata with SHA256 and package file inventory.",
                 "",
                 f"SHA256: `{digest}`",
@@ -2435,6 +2658,12 @@ def run_regression_tests(_args: Optional[argparse.Namespace] = None) -> int:
         zotero_path = write_zotero_report([sample], tmp, "http://127.0.0.1:1/api/users/0")
         assert zotero_path.exists()
         checks.append("zotero_report_offline_safe")
+
+        paywalled = make_record(title="Paywalled Test Paper", doi="10.1234/paywall", url="https://doi.org/10.1234/paywall")
+        plan = write_access_plan(paywalled, {"status": "failed", "candidate_count": 0, "tried": []}, tmp, email="")
+        assert plan["status"] == "needs_access" and Path(plan["path"]).exists() and Path(plan["markdown_path"]).exists()
+        assert any(item.get("source") == "institutional_access" for item in plan["alternatives"])
+        checks.append("paywall_access_plan")
 
         env_args = argparse.Namespace(config="", zotero=False, zotero_api="")
         assert run_check_env(env_args) == 0

@@ -7,6 +7,7 @@ Portable Codex/Claude skill for lawful scholarly paper search, open-access acqui
 - Search OpenAlex, Semantic Scholar, arXiv, Crossref, PubMed, PMC, and Unpaywall-backed OA locations.
 - Resolve DOI, arXiv, PMID, PMCID, URL, and mixed batch identifier files.
 - Download lawful open-access PDFs and cache/resume long runs.
+- Generate lawful access plans for paywalled publisher records.
 - Fall back to PMC XML full text when PMCID PDF download is unavailable.
 - Parse PDFs to Markdown with read plans and end-of-paper sentinels.
 - Export `results.json`, `papers.csv`, `papers.bib`, `papers.ris`, `papers.csl.json`, `report.md`, and `report.html`.
@@ -27,7 +28,7 @@ For Claude:
 Copy-Item -Path .\paper-research-downloader -Destination $env:USERPROFILE\.claude\skills\paper-research-downloader -Recurse -Force
 ```
 
-Or download `dist/paper-research-downloader-v1.2.0.zip` and extract the `paper-research-downloader` folder into your skills directory.
+Or download `dist/paper-research-downloader-v1.3.0.zip` and extract the `paper-research-downloader` folder into your skills directory.
 
 ## Quick Start
 
@@ -51,4 +52,3 @@ This skill only uses lawful open-access sources, author/repository copies, PMC/a
 python .\paper-research-downloader\scripts\paper_research_downloader.py test
 python .\paper-research-downloader\scripts\paper_research_downloader.py self-test
 ```
-

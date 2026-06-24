@@ -1,0 +1,21 @@
+{
+  "name": "paper-research-downloader",
+  "version": "1.3.0",
+  "zip_path": "C:\\Users\\Admin\\Desktop\\skill\\paper-research-downloader-dist\\paper-research-downloader-v1.3.0.zip",
+  "sha256": "8bd8ea46e341a4cb0f4e60b3fb2d39e24707e32dc81712533e70c8761b99c7fb",
+  "created": "2026-06-24T12:26:23",
+  "file_count": 5,
+  "files": [
+    "paper-research-downloader/SKILL.md",
+    "paper-research-downloader/agents/openai.yaml",
+    "paper-research-downloader/references/download-strategy.md",
+    "paper-research-downloader/references/skill-landscape.md",
+    "paper-research-downloader/scripts/paper_research_downloader.py"
+  ],
+  "excluded": [
+    ".pytest_cache",
+    "__pycache__",
+    "config.local.json",
+    "dist"
+  ]
+}
